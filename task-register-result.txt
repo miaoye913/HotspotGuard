@@ -1,0 +1,13 @@
+﻿
+elevated: True
+cmd: schtasks /Create /F /TN "HotspotGuard" /TR "D:\HotspotGuard\HotspotGuard.exe watch" /SC ONLOGON /RL HIGHEST
+  成功: 成功创建计划任务 "HotspotGuard"。
+rc: 0
+--- verify ---
+  上次运行时间:                       2026/9/2 10:59:52
+  上次结果:                           -1
+  要运行的任务:                       D:\HotspotGuard\HotspotGuard.exe watch
+  计划任务状态:                       已启用
+  作为用户运行:                       49627
+  计划类型:                           登陆时
+== DONE ==
