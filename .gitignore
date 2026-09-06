@@ -1,7 +1,7 @@
 # 运行时生成的文件不入库
 *.log
 hotspotguard.json
-*.result.txt
+*-result.txt
 
 # Windows
 Thumbs.db
