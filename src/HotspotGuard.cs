@@ -310,6 +310,7 @@ namespace HotspotGuard
         [DataMember] public bool ExitOnOtherScreen = true;
         [DataMember] public bool StopWhenNoTrigger = false;
         [DataMember] public bool RequireACPower = true;  // 仅在接通电源时触发; 未插电则后台待机
+        [DataMember] public int StartupDelaySeconds = 120; // 启动延时: 期间不检测不退出, 便于先打开设置
         [DataMember] public int MaxRunMinutes = 5;
         [DataMember] public int CheckIntervalSeconds = 10;
     }
@@ -338,6 +339,8 @@ namespace HotspotGuard
                             // DCJS 不执行字段初始化器: 旧配置缺少的字段需手动补默认值
                             if (json.IndexOf("\"RequireACPower\"", StringComparison.OrdinalIgnoreCase) < 0)
                                 cfg.RequireACPower = true; // 默认开启"仅接电触发"
+                            if (json.IndexOf("\"StartupDelaySeconds\"", StringComparison.OrdinalIgnoreCase) < 0)
+                                cfg.StartupDelaySeconds = 120; // 默认启动延时 2 分钟
                         }
                     }
                 }
@@ -480,11 +483,12 @@ namespace HotspotGuard
         private static NotifyIcon Tray;
         private static bool Exiting;
         private static bool WaitingForAC;      // 未插电待机中
-        private static System.Windows.Forms.Timer ExitTimer; // 自动退出计时(待机时不计时)
+        private static bool InGrace;           // 启动延时中(不检测不退出, 便于配置)
+        private static System.Windows.Forms.Timer ExitTimer; // 自动退出计时(延时/待机时不计时)
 
         private static void EvaluateAndMaybeExit()
         {
-            if (Exiting) return;
+            if (Exiting || InGrace) return; // 启动延时期间不自动检测, 避免秒退
             try
             {
                 Cfg = ConfigStore.Load(); // 每次重新读取, 设置即时生效
@@ -553,7 +557,7 @@ namespace HotspotGuard
                 var devForm = new DevChangeForm();
                 devForm.DeviceChanged += (s, e) => { if (!Exiting) { Log.Write("检测到设备变化"); EvaluateAndMaybeExit(); } };
                 devForm.PowerChanged += (s, e) => { if (!Exiting) { Log.Write("电源状态变化"); EvaluateAndMaybeExit(); } };
-                devForm.Load += (s, e) => { if (!Exiting) EvaluateAndMaybeExit(); }; // 启动时先判定一次
+                devForm.Load += (s, e) => { if (!Exiting) EvaluateAndMaybeExit(); }; // 延时为 0 时启动即判定; 有延时则被 InGrace 拦截
 
                 var tCheck = new System.Windows.Forms.Timer();
                 tCheck.Interval = Math.Max(5, Cfg.CheckIntervalSeconds) * 1000;
@@ -565,7 +569,7 @@ namespace HotspotGuard
                 ExitTimer.Tick += (s, e) =>
                 {
                     if (Exiting) return;
-                    if (WaitingForAC) { ExitTimer.Stop(); ExitTimer.Start(); return; } // 待机中不计时, 接通电源后重新计时
+                    if (InGrace || WaitingForAC) { ExitTimer.Stop(); ExitTimer.Start(); return; } // 延时/待机中不计时
                     Log.Write("运行满 " + Cfg.MaxRunMinutes + " 分钟, 自动退出");
                     Notify.Send("屏幕触发热点", "监控 " + Cfg.MaxRunMinutes + " 分钟未检测到触发设备, 程序已自动退出");
                     Exiting = true;
@@ -573,9 +577,34 @@ namespace HotspotGuard
                     Tray.Visible = false;
                     Environment.Exit(0);
                 };
-                ExitTimer.Start();
 
                 Log.Write("托盘监控启动: 屏幕触发 " + Cfg.Screens.Count + " 项, USB 触发 " + Cfg.Usb.Count + " 项, 最长运行 " + Cfg.MaxRunMinutes + " 分钟");
+
+                // 启动延时: 期间不检测、不退出, 便于先打开设置配置触发项
+                int delaySec = Math.Max(0, Cfg.StartupDelaySeconds);
+                if (delaySec > 0)
+                {
+                    InGrace = true;
+                    if (Tray != null) Tray.Text = "屏幕/USB 触发热点 - 启动延时(" + delaySec + "秒)";
+                    Log.Write("启动延时 " + delaySec + " 秒(期间可右键托盘 -> 设置), 延时结束后开始监控");
+                    var graceTimer = new System.Windows.Forms.Timer();
+                    graceTimer.Interval = delaySec * 1000;
+                    graceTimer.Tick += (s, e) =>
+                    {
+                        if (Exiting) return;
+                        InGrace = false;
+                        graceTimer.Stop();
+                        if (Tray != null) Tray.Text = "屏幕/USB 触发热点";
+                        Log.Write("启动延时结束, 开始监控");
+                        ExitTimer.Start();
+                        EvaluateAndMaybeExit();
+                    };
+                    graceTimer.Start();
+                }
+                else
+                {
+                    ExitTimer.Start();
+                }
 
                 Application.Run(devForm);
             }
@@ -598,7 +627,7 @@ namespace HotspotGuard
         private Button btnTabScreens, btnTabUsb, btnTabGeneral;
         private Panel panelScreens, panelUsb, panelGeneral;
         private CheckBox chkIgnore, chkExitOther, chkStopNoTrig, chkAC;
-        private NumericUpDown numMinutes;
+        private NumericUpDown numMinutes, numStartDelay;
         private List<DeviceInfo> screensAll, usbPresent;
         private List<TriggerItem> screenTriggers, usbTriggers;
         private bool loading;
@@ -810,12 +839,21 @@ namespace HotspotGuard
             numMinutes.Value = Math.Max(1, Cfg.MaxRunMinutes);
             numMinutes.BackColor = PanelBg; numMinutes.ForeColor = Fg;
 
+            var ld = new Label();
+            ld.Text = "启动延时(分钟, 0=立即; 期间可先配置):";
+            ld.ForeColor = Fg; ld.Location = new Point(24, 242); ld.AutoSize = true;
+            numStartDelay = new NumericUpDown();
+            numStartDelay.Location = new Point(280, 238);
+            numStartDelay.Minimum = 0; numStartDelay.Maximum = 10;
+            numStartDelay.Value = Math.Max(0, Math.Min(10, (int)Math.Round(Cfg.StartupDelaySeconds / 60.0)));
+            numStartDelay.BackColor = PanelBg; numStartDelay.ForeColor = Fg;
+
             var info = new Label();
             info.Text = "触发设备连接 -> 执行动作(开/关热点) -> 通知 -> 退出。\r\n屏幕触发项只匹配显示器, USB 触发项只匹配 USB 设备, 互不混淆。\r\n配置保存在 HotspotGuard.exe 同目录的 hotspotguard.json。";
-            info.ForeColor = Sub; info.Location = new Point(24, 240); info.Size = new Size(600, 60);
+            info.ForeColor = Sub; info.Location = new Point(24, 280); info.Size = new Size(600, 60);
             info.Font = new Font("Segoe UI", 8.5f);
 
-            panelGeneral.Controls.AddRange(new Control[] { chkIgnore, chkExitOther, chkStopNoTrig, chkAC, lp, lg, numMinutes, info });
+            panelGeneral.Controls.AddRange(new Control[] { chkIgnore, chkExitOther, chkStopNoTrig, chkAC, lp, lg, numMinutes, ld, numStartDelay, info });
 
             // ---- 底部按钮 ----
             var btnOk = FlatBtn("保存", Accent, Color.White);
@@ -921,6 +959,7 @@ namespace HotspotGuard
             Cfg.StopWhenNoTrigger = chkStopNoTrig.Checked;
             Cfg.RequireACPower = chkAC.Checked;
             Cfg.MaxRunMinutes = (int)numMinutes.Value;
+            Cfg.StartupDelaySeconds = (int)numStartDelay.Value * 60;
             ConfigStore.Save(Cfg);
             MessageBox.Show("已保存, 下次运行生效。", "完成");
             Close();
@@ -970,7 +1009,7 @@ namespace HotspotGuard
             Console.WriteLine("电源状态: " + PowerState.Describe());
             Console.WriteLine("热点状态: " + Hotspot.GetState());
             var cfg = ConfigStore.Load();
-            Console.WriteLine("屏幕触发项: " + cfg.Screens.Count + " 项, USB 触发项: " + cfg.Usb.Count + " 项, 仅接电触发: " + cfg.RequireACPower);
+            Console.WriteLine("屏幕触发项: " + cfg.Screens.Count + " 项, USB 触发项: " + cfg.Usb.Count + " 项, 仅接电触发: " + cfg.RequireACPower + ", 启动延时: " + cfg.StartupDelaySeconds + " 秒");
         }
 
         [STAThread]
