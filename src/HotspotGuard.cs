@@ -519,12 +519,13 @@ namespace HotspotGuard
             catch (Exception ex) { Log.Write("判定出错: " + ex.Message); }
         }
 
-        public static void Run()
+        public static void Run(bool boot)
         {
             using (var mutex = new Mutex(false, "Local\\HotspotGuard"))
             {
                 if (!mutex.WaitOne(0)) { Log.Write("已有实例在运行, 退出"); return; }
                 Cfg = ConfigStore.Load();
+                if (boot) Cfg.StartupDelaySeconds = 0; // 开机自启(boot): 跳过启动延时, 立即检测
 
                 try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
 
@@ -840,7 +841,7 @@ namespace HotspotGuard
             numMinutes.BackColor = PanelBg; numMinutes.ForeColor = Fg;
 
             var ld = new Label();
-            ld.Text = "启动延时(分钟, 0=立即; 期间可先配置):";
+            ld.Text = "启动延时(分钟, 0=立即; 仅手动打开时生效, 开机自启立即检测):";
             ld.ForeColor = Fg; ld.Location = new Point(24, 242); ld.AutoSize = true;
             numStartDelay = new NumericUpDown();
             numStartDelay.Location = new Point(280, 238);
@@ -981,14 +982,15 @@ namespace HotspotGuard
             Console.WriteLine("屏幕/USB 触发热点 - HotspotGuard");
             Console.WriteLine();
             Console.WriteLine("用法: HotspotGuard.exe [模式]");
-            Console.WriteLine("  (默认) watch   托盘监控: 触发设备连接->执行动作->通知->退出; 满N分钟自动退出");
+            Console.WriteLine("  (默认) watch   托盘监控(手动打开): 先按启动延时驻留便于配置, 延时后开始执行规则");
+            Console.WriteLine("  boot            托盘监控(开机自启用): 跳过启动延时, 立即检测执行");
             Console.WriteLine("  once           检测一次并执行后退出");
             Console.WriteLine("  status         查看当前屏幕/USB 设备与热点状态");
             Console.WriteLine("  config         打开图形化设置(选择触发设备)");
             Console.WriteLine("  start          立即开启热点");
             Console.WriteLine("  stop           立即关闭热点");
             Console.WriteLine();
-            Console.WriteLine("watch/once/start/stop 需要管理员权限, 非管理员时自动请求提权。");
+            Console.WriteLine("watch/boot/once/start/stop 需要管理员权限, 非管理员时自动请求提权。");
         }
 
         private static void ShowStatus()
@@ -1027,7 +1029,7 @@ namespace HotspotGuard
 
             Log.Write("==== HotspotGuard 启动, Mode=" + mode + " ====");
 
-            bool needAdmin = mode == "watch" || mode == "once" || mode == "start" || mode == "stop";
+            bool needAdmin = mode == "watch" || mode == "boot" || mode == "once" || mode == "start" || mode == "stop";
             if (needAdmin && !IsAdmin())
             {
                 Console.WriteLine("需要管理员权限, 正在请求提权...");
@@ -1073,7 +1075,10 @@ namespace HotspotGuard
                     break;
                 }
                 default:
-                    TrayApp.Run();
+                    TrayApp.Run(false);
+                    break;
+                case "boot":
+                    TrayApp.Run(true);
                     break;
             }
         }

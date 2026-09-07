@@ -7,7 +7,7 @@ function Log($m) { Add-Content -Path $Out -Value $m -Encoding UTF8; Write-Host $
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 Log ("elevated: " + $isAdmin)
 
-$cmd = 'schtasks /Create /F /TN "HotspotGuard" /TR "D:\HotspotGuard\HotspotGuard.exe watch" /SC ONLOGON /RL HIGHEST'
+$cmd = 'schtasks /Create /F /TN "HotspotGuard" /TR "D:\HotspotGuard\HotspotGuard.exe boot" /SC ONLOGON /RL HIGHEST'
 Log ("cmd: " + $cmd)
 cmd /c $cmd 2>&1 | ForEach-Object { Log "  $_" }
 Log ("rc: " + $LASTEXITCODE)
