@@ -62,6 +62,44 @@ namespace HotspotGuard
         public static extern bool SetupDiGetDeviceRegistryProperty(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData, uint Property, out uint RegDataType, StringBuilder buf, uint len, out uint need);
         [DllImport("cfgmgr32.dll", SetLastError = true)]
         public static extern int CM_Get_DevNode_Status(out uint ulStatus, out uint ulProblemNumber, uint dnDevInst, uint ulFlags);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct SYSTEM_POWER_STATUS
+        {
+            public byte ACLineStatus;   // 0=电池 1=交流电 255=未知
+            public byte BatteryFlag;
+            public byte BatteryLifePercent;
+            public byte Reserved1;
+            public uint BatteryLifeTime;
+            public uint BatteryFullLifeTime;
+        }
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS sps);
+    }
+
+    internal static class PowerState
+    {
+        // 测试开关: 设置环境变量 HSG_SIM_BATTERY=1 可模拟"未插电"状态
+        private static bool SimBattery { get { return Environment.GetEnvironmentVariable("HSG_SIM_BATTERY") == "1"; } }
+
+        public static bool IsOnAC()
+        {
+            if (SimBattery) return false;
+            Native.SYSTEM_POWER_STATUS sps;
+            if (Native.GetSystemPowerStatus(out sps))
+                return sps.ACLineStatus == 1;
+            return true; // 查询失败(如台式机/虚拟机)按已接电处理
+        }
+
+        public static string Describe()
+        {
+            if (SimBattery) return "使用电池 (模拟)";
+            Native.SYSTEM_POWER_STATUS sps;
+            if (!Native.GetSystemPowerStatus(out sps)) return "未知";
+            if (sps.ACLineStatus == 1) return "已接通电源 (交流电)";
+            if (sps.ACLineStatus == 0) return "使用电池";
+            return "未知";
+        }
     }
 
     public class DeviceInfo
@@ -271,6 +309,7 @@ namespace HotspotGuard
         [DataMember] public bool IgnoreIntegrated = true;
         [DataMember] public bool ExitOnOtherScreen = true;
         [DataMember] public bool StopWhenNoTrigger = false;
+        [DataMember] public bool RequireACPower = true;  // 仅在接通电源时触发; 未插电则后台待机
         [DataMember] public int MaxRunMinutes = 5;
         [DataMember] public int CheckIntervalSeconds = 10;
     }
@@ -293,7 +332,13 @@ namespace HotspotGuard
                     using (var ms = new MemoryStream(Encoding.UTF8.GetBytes(json)))
                     {
                         var loaded = ser.ReadObject(ms) as Config;
-                        if (loaded != null) cfg = loaded;
+                        if (loaded != null)
+                        {
+                            cfg = loaded;
+                            // DCJS 不执行字段初始化器: 旧配置缺少的字段需手动补默认值
+                            if (json.IndexOf("\"RequireACPower\"", StringComparison.OrdinalIgnoreCase) < 0)
+                                cfg.RequireACPower = true; // 默认开启"仅接电触发"
+                        }
                     }
                 }
             }
@@ -394,6 +439,7 @@ namespace HotspotGuard
     internal class DevChangeForm : Form
     {
         public event EventHandler DeviceChanged;
+        public event EventHandler PowerChanged;
 
         public DevChangeForm()
         {
@@ -415,6 +461,14 @@ namespace HotspotGuard
                     if (DeviceChanged != null) DeviceChanged(this, EventArgs.Empty);
                 }
             }
+            else if (m.Msg == 0x0218) // WM_POWERBROADCAST
+            {
+                int w = (int)m.WParam.ToInt64();
+                if (w == 0x000A) // PBT_APMPOWERSTATUSCHANGE
+                {
+                    if (PowerChanged != null) PowerChanged(this, EventArgs.Empty);
+                }
+            }
             base.WndProc(ref m);
         }
     }
@@ -425,6 +479,8 @@ namespace HotspotGuard
         private static Config Cfg;
         private static NotifyIcon Tray;
         private static bool Exiting;
+        private static bool WaitingForAC;      // 未插电待机中
+        private static System.Windows.Forms.Timer ExitTimer; // 自动退出计时(待机时不计时)
 
         private static void EvaluateAndMaybeExit()
         {
@@ -432,6 +488,27 @@ namespace HotspotGuard
             try
             {
                 Cfg = ConfigStore.Load(); // 每次重新读取, 设置即时生效
+
+                // 电源门控: 开启"仅接电触发"且当前用电池 -> 后台待机, 直到接通电源
+                if (Cfg.RequireACPower && !PowerState.IsOnAC())
+                {
+                    if (!WaitingForAC)
+                    {
+                        WaitingForAC = true;
+                        Log.Write("未接通电源(使用电池), 后台待机, 接通电源后自动恢复监控");
+                        if (Tray != null) Tray.Text = "屏幕/USB 触发热点 - 待机(未插电)";
+                        Notify.Send("屏幕/USB 触发热点", "未接通电源(使用电池)，后台待机中。接通电源后自动恢复监控。");
+                    }
+                    return; // 待机: 不执行任何动作, 不退出
+                }
+                if (WaitingForAC)
+                {
+                    WaitingForAC = false;
+                    Log.Write("已接通电源, 恢复监控");
+                    if (Tray != null) Tray.Text = "屏幕/USB 触发热点";
+                    if (ExitTimer != null) { ExitTimer.Stop(); ExitTimer.Start(); } // 重新计时
+                }
+
                 string r = Evaluator.Evaluate(Cfg);
                 if (r != "none") { Exiting = true; Notify.Pump(5); Tray.Visible = false; Environment.Exit(0); }
             }
@@ -475,6 +552,7 @@ namespace HotspotGuard
 
                 var devForm = new DevChangeForm();
                 devForm.DeviceChanged += (s, e) => { if (!Exiting) { Log.Write("检测到设备变化"); EvaluateAndMaybeExit(); } };
+                devForm.PowerChanged += (s, e) => { if (!Exiting) { Log.Write("电源状态变化"); EvaluateAndMaybeExit(); } };
                 devForm.Load += (s, e) => { if (!Exiting) EvaluateAndMaybeExit(); }; // 启动时先判定一次
 
                 var tCheck = new System.Windows.Forms.Timer();
@@ -482,11 +560,12 @@ namespace HotspotGuard
                 tCheck.Tick += (s, e) => EvaluateAndMaybeExit();
                 tCheck.Start();
 
-                var tExit = new System.Windows.Forms.Timer();
-                tExit.Interval = Math.Max(1, Cfg.MaxRunMinutes) * 60 * 1000;
-                tExit.Tick += (s, e) =>
+                ExitTimer = new System.Windows.Forms.Timer();
+                ExitTimer.Interval = Math.Max(1, Cfg.MaxRunMinutes) * 60 * 1000;
+                ExitTimer.Tick += (s, e) =>
                 {
                     if (Exiting) return;
+                    if (WaitingForAC) { ExitTimer.Stop(); ExitTimer.Start(); return; } // 待机中不计时, 接通电源后重新计时
                     Log.Write("运行满 " + Cfg.MaxRunMinutes + " 分钟, 自动退出");
                     Notify.Send("屏幕触发热点", "监控 " + Cfg.MaxRunMinutes + " 分钟未检测到触发设备, 程序已自动退出");
                     Exiting = true;
@@ -494,7 +573,7 @@ namespace HotspotGuard
                     Tray.Visible = false;
                     Environment.Exit(0);
                 };
-                tExit.Start();
+                ExitTimer.Start();
 
                 Log.Write("托盘监控启动: 屏幕触发 " + Cfg.Screens.Count + " 项, USB 触发 " + Cfg.Usb.Count + " 项, 最长运行 " + Cfg.MaxRunMinutes + " 分钟");
 
@@ -518,7 +597,7 @@ namespace HotspotGuard
         private ComboBox cmbScreensAction, cmbUsbAction;
         private Button btnTabScreens, btnTabUsb, btnTabGeneral;
         private Panel panelScreens, panelUsb, panelGeneral;
-        private CheckBox chkIgnore, chkExitOther, chkStopNoTrig;
+        private CheckBox chkIgnore, chkExitOther, chkStopNoTrig, chkAC;
         private NumericUpDown numMinutes;
         private List<DeviceInfo> screensAll, usbPresent;
         private List<TriggerItem> screenTriggers, usbTriggers;
@@ -712,21 +791,31 @@ namespace HotspotGuard
             chkStopNoTrig.ForeColor = Fg; chkStopNoTrig.Checked = Cfg.StopWhenNoTrigger;
             chkStopNoTrig.Location = new Point(24, 102); chkStopNoTrig.AutoSize = true;
 
+            chkAC = new CheckBox();
+            chkAC.Text = "仅在接通电源(插电)时触发动作; 未插电时后台待机直到接通电源";
+            chkAC.ForeColor = Fg; chkAC.Checked = Cfg.RequireACPower;
+            chkAC.Location = new Point(24, 138); chkAC.AutoSize = true;
+
+            var lp = new Label();
+            lp.Text = "当前电源: " + PowerState.Describe();
+            lp.ForeColor = Fg; lp.Location = new Point(24, 172); lp.AutoSize = true;
+            lp.Font = new Font("Segoe UI", 9f);
+
             var lg = new Label();
             lg.Text = "最长运行(分钟后自动退出):";
-            lg.ForeColor = Fg; lg.Location = new Point(24, 150); lg.AutoSize = true;
+            lg.ForeColor = Fg; lg.Location = new Point(24, 206); lg.AutoSize = true;
             numMinutes = new NumericUpDown();
-            numMinutes.Location = new Point(220, 146);
+            numMinutes.Location = new Point(220, 202);
             numMinutes.Minimum = 1; numMinutes.Maximum = 120;
             numMinutes.Value = Math.Max(1, Cfg.MaxRunMinutes);
             numMinutes.BackColor = PanelBg; numMinutes.ForeColor = Fg;
 
             var info = new Label();
             info.Text = "触发设备连接 -> 执行动作(开/关热点) -> 通知 -> 退出。\r\n屏幕触发项只匹配显示器, USB 触发项只匹配 USB 设备, 互不混淆。\r\n配置保存在 HotspotGuard.exe 同目录的 hotspotguard.json。";
-            info.ForeColor = Sub; info.Location = new Point(24, 200); info.Size = new Size(600, 60);
+            info.ForeColor = Sub; info.Location = new Point(24, 240); info.Size = new Size(600, 60);
             info.Font = new Font("Segoe UI", 8.5f);
 
-            panelGeneral.Controls.AddRange(new Control[] { chkIgnore, chkExitOther, chkStopNoTrig, lg, numMinutes, info });
+            panelGeneral.Controls.AddRange(new Control[] { chkIgnore, chkExitOther, chkStopNoTrig, chkAC, lp, lg, numMinutes, info });
 
             // ---- 底部按钮 ----
             var btnOk = FlatBtn("保存", Accent, Color.White);
@@ -830,6 +919,7 @@ namespace HotspotGuard
             Cfg.IgnoreIntegrated = chkIgnore.Checked;
             Cfg.ExitOnOtherScreen = chkExitOther.Checked;
             Cfg.StopWhenNoTrigger = chkStopNoTrig.Checked;
+            Cfg.RequireACPower = chkAC.Checked;
             Cfg.MaxRunMinutes = (int)numMinutes.Value;
             ConfigStore.Save(Cfg);
             MessageBox.Show("已保存, 下次运行生效。", "完成");
@@ -877,9 +967,10 @@ namespace HotspotGuard
             foreach (var u in DeviceQuery.Enumerate(Native.GUID_USB, true))
                 Console.WriteLine("  {0,-30} {1}", u.Name, u.Pnp);
             Console.WriteLine();
+            Console.WriteLine("电源状态: " + PowerState.Describe());
             Console.WriteLine("热点状态: " + Hotspot.GetState());
             var cfg = ConfigStore.Load();
-            Console.WriteLine("屏幕触发项: " + cfg.Screens.Count + " 项, USB 触发项: " + cfg.Usb.Count + " 项");
+            Console.WriteLine("屏幕触发项: " + cfg.Screens.Count + " 项, USB 触发项: " + cfg.Usb.Count + " 项, 仅接电触发: " + cfg.RequireACPower);
         }
 
         [STAThread]
@@ -933,6 +1024,11 @@ namespace HotspotGuard
                 case "once":
                 {
                     var cfg = ConfigStore.Load();
+                    if (cfg.RequireACPower && !PowerState.IsOnAC())
+                    {
+                        Log.Write("未接通电源(使用电池), 跳过本次检测");
+                        break;
+                    }
                     string r = Evaluator.Evaluate(cfg);
                     Log.Write("once 模式结束, 结果: " + r);
                     break;
