@@ -17,7 +17,7 @@ set TASK=HotspotGuard
 set EXE=D:\HotspotGuard\HotspotGuard.exe
 
 rem 直接运行 exe (winexe, 无控制台窗口, 不会弹出蓝色 PowerShell)
-schtasks /Create /F /TN "%TASK%" /TR "%EXE% watch" /SC ONLOGON /RL HIGHEST
+schtasks /Create /F /TN "%TASK%" /TR "%EXE% boot" /SC ONLOGON /RL HIGHEST
 
 if errorlevel 1 (
     echo.
