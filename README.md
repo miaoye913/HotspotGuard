@@ -47,20 +47,23 @@ Windows 小工具：**检测到指定设备（外接屏幕 / USB）连接时，�
 ## 命令行
 
 ```
-HotspotGuard.exe [watch|boot|once|status|config|start|stop|help]
+HotspotGuard.exe [watch|boot|once|status|config|start|stop|autostart|setautostart|help]
   watch    托盘监控(手动打开默认): 先按启动延时驻留便于配置, 延时后执行规则
   boot     托盘监控(开机自启用): 跳过启动延时, 立即检测执行
   once     检测一次并执行后退出
-  status   查看当前屏幕/USB 设备与热点状态
-  config   图形化设置
+  status   查看当前屏幕/USB 设备、热点与自启动状态
+  config   图形化设置(含自启动开关)
   start    立即开启热点
   stop     立即关闭热点
+  autostart      查询是否开启开机自启动
+  setautostart   开启/关闭开机自启动: on | off
 ```
 
 ## 开机自启动
 
-- 双击 `install-task.bat`（自动请求管理员权限）注册"登录触发 + 最高权限"的计划任务，以 **boot 模式**运行（开机立即检测，不受手动启动延时影响）
-- 双击 `uninstall-task.bat` 移除
+- **设置界面开关**：设置 → 通用设置 → "开机自启动"复选框（保存时若变更会弹 UAC，点是即可；不需要时可随时取消勾选关闭）
+- 命令行：`HotspotGuard.exe setautostart on|off`，查询用 `HotspotGuard.exe autostart`
+- 传统方式：双击 `install-task.bat` 注册"登录触发 + 最高权限"计划任务（boot 模式，开机立即检测）；`uninstall-task.bat` 移除
 
 ## 文件与日志
 

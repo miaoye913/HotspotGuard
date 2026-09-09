@@ -627,7 +627,7 @@ namespace HotspotGuard
         private ComboBox cmbScreensAction, cmbUsbAction;
         private Button btnTabScreens, btnTabUsb, btnTabGeneral;
         private Panel panelScreens, panelUsb, panelGeneral;
-        private CheckBox chkIgnore, chkExitOther, chkStopNoTrig, chkAC;
+        private CheckBox chkIgnore, chkExitOther, chkStopNoTrig, chkAC, chkAutoStart;
         private NumericUpDown numMinutes, numStartDelay;
         private List<DeviceInfo> screensAll, usbPresent;
         private List<TriggerItem> screenTriggers, usbTriggers;
@@ -824,37 +824,43 @@ namespace HotspotGuard
             chkAC = new CheckBox();
             chkAC.Text = "仅在接通电源(插电)时触发动作; 未插电时后台待机直到接通电源";
             chkAC.ForeColor = Fg; chkAC.Checked = Cfg.RequireACPower;
-            chkAC.Location = new Point(24, 138); chkAC.AutoSize = true;
+            chkAC.Location = new Point(24, 150); chkAC.AutoSize = true;
+
+            chkAutoStart = new CheckBox();
+            chkAutoStart.Text = "开机自启动(登录时自动运行, 立即检测) - 当前: " + (Autostart.IsEnabled() ? "已开启" : "已关闭");
+            chkAutoStart.ForeColor = Fg; chkAutoStart.Checked = Autostart.IsEnabled();
+            chkAutoStart.Location = new Point(24, 182); chkAutoStart.AutoSize = true;
+            chkAutoStart.CheckedChanged += (s, e) => { chkAutoStart.Text = "开机自启动(登录时自动运行, 立即检测) - 将改为: " + (chkAutoStart.Checked ? "开启" : "关闭"); };
 
             var lp = new Label();
             lp.Text = "当前电源: " + PowerState.Describe();
-            lp.ForeColor = Fg; lp.Location = new Point(24, 172); lp.AutoSize = true;
+            lp.ForeColor = Fg; lp.Location = new Point(24, 214); lp.AutoSize = true;
             lp.Font = new Font("Segoe UI", 9f);
 
             var lg = new Label();
             lg.Text = "最长运行(分钟后自动退出):";
-            lg.ForeColor = Fg; lg.Location = new Point(24, 206); lg.AutoSize = true;
+            lg.ForeColor = Fg; lg.Location = new Point(24, 244); lg.AutoSize = true;
             numMinutes = new NumericUpDown();
-            numMinutes.Location = new Point(220, 202);
+            numMinutes.Location = new Point(220, 240);
             numMinutes.Minimum = 1; numMinutes.Maximum = 120;
             numMinutes.Value = Math.Max(1, Cfg.MaxRunMinutes);
             numMinutes.BackColor = PanelBg; numMinutes.ForeColor = Fg;
 
             var ld = new Label();
-            ld.Text = "启动延时(分钟, 0=立即; 仅手动打开时生效, 开机自启立即检测):";
-            ld.ForeColor = Fg; ld.Location = new Point(24, 242); ld.AutoSize = true;
+            ld.Text = "启动延时(分钟, 0=立即; 仅手动打开时生效):";
+            ld.ForeColor = Fg; ld.Location = new Point(24, 276); ld.AutoSize = true;
             numStartDelay = new NumericUpDown();
-            numStartDelay.Location = new Point(280, 238);
+            numStartDelay.Location = new Point(260, 272);
             numStartDelay.Minimum = 0; numStartDelay.Maximum = 10;
             numStartDelay.Value = Math.Max(0, Math.Min(10, (int)Math.Round(Cfg.StartupDelaySeconds / 60.0)));
             numStartDelay.BackColor = PanelBg; numStartDelay.ForeColor = Fg;
 
             var info = new Label();
-            info.Text = "触发设备连接 -> 执行动作(开/关热点) -> 通知 -> 退出。\r\n屏幕触发项只匹配显示器, USB 触发项只匹配 USB 设备, 互不混淆。\r\n配置保存在 HotspotGuard.exe 同目录的 hotspotguard.json。";
-            info.ForeColor = Sub; info.Location = new Point(24, 280); info.Size = new Size(600, 60);
+            info.Text = "触发设备连接 -> 执行动作(开/关热点) -> 通知 -> 退出。\r\n屏幕/USB 触发独立; 开启自启动需管理员(UAC 点是即可)。\r\n配置保存在 HotspotGuard.exe 同目录的 hotspotguard.json。";
+            info.ForeColor = Sub; info.Location = new Point(24, 316); info.Size = new Size(620, 70);
             info.Font = new Font("Segoe UI", 8.5f);
 
-            panelGeneral.Controls.AddRange(new Control[] { chkIgnore, chkExitOther, chkStopNoTrig, chkAC, lp, lg, numMinutes, ld, numStartDelay, info });
+            panelGeneral.Controls.AddRange(new Control[] { chkIgnore, chkExitOther, chkStopNoTrig, chkAC, chkAutoStart, lp, lg, numMinutes, ld, numStartDelay, info });
 
             // ---- 底部按钮 ----
             var btnOk = FlatBtn("保存", Accent, Color.White);
@@ -962,8 +968,81 @@ namespace HotspotGuard
             Cfg.MaxRunMinutes = (int)numMinutes.Value;
             Cfg.StartupDelaySeconds = (int)numStartDelay.Value * 60;
             ConfigStore.Save(Cfg);
-            MessageBox.Show("已保存, 下次运行生效。", "完成");
+
+            // 自启动状态变更 -> 需要管理员, 提权调用自身 setautostart
+            bool wantAuto = chkAutoStart.Checked;
+            bool haveAuto = Autostart.IsEnabled();
+            if (wantAuto != haveAuto)
+            {
+                try
+                {
+                    var psi = new ProcessStartInfo(Application.ExecutablePath);
+                    psi.Verb = "runas";
+                    psi.UseShellExecute = true;
+                    psi.Arguments = "setautostart " + (wantAuto ? "on" : "off");
+                    Process.Start(psi);
+                    MessageBox.Show(wantAuto
+                        ? "已请求开启开机自启动(如弹出 UAC 请点\"是\")。"
+                        : "已请求关闭开机自启动(如弹出 UAC 请点\"是\")。下次开机不再自动运行。", "完成");
+                }
+                catch
+                {
+                    MessageBox.Show("设置自启动需要管理员权限, 操作被取消。\r\n可手动运行: HotspotGuard.exe setautostart on|off", "提示");
+                }
+            }
+            else
+            {
+                MessageBox.Show("已保存, 下次运行生效。", "完成");
+            }
             Close();
+        }
+    }
+
+    // ============================ 开机自启动(计划任务) ============================
+    internal static class Autostart
+    {
+        private const string TaskName = "HotspotGuard";
+
+        public static bool IsEnabled()
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("schtasks.exe", "/Query /TN " + TaskName);
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+                using (var p = Process.Start(psi))
+                {
+                    p.WaitForExit(4000);
+                    return p.ExitCode == 0;
+                }
+            }
+            catch { return false; }
+        }
+
+        // 需要管理员权限
+        public static bool SetEnabled(bool enable)
+        {
+            try
+            {
+                string exe = Application.ExecutablePath;
+                string args = enable
+                    ? "/Create /F /TN " + TaskName + " /TR \"" + exe + " boot\" /SC ONLOGON /RL HIGHEST"
+                    : "/Delete /TN " + TaskName + " /F";
+                var psi = new ProcessStartInfo("schtasks.exe", args);
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+                using (var p = Process.Start(psi))
+                {
+                    p.WaitForExit(15000);
+                    Log.Write("开机自启动" + (enable ? "已开启" : "已关闭") + " (schtasks exit=" + p.ExitCode + ")");
+                    return p.ExitCode == 0;
+                }
+            }
+            catch (Exception ex) { Log.Write("设置开机自启动失败: " + ex.Message); return false; }
         }
     }
 
@@ -985,12 +1064,14 @@ namespace HotspotGuard
             Console.WriteLine("  (默认) watch   托盘监控(手动打开): 先按启动延时驻留便于配置, 延时后开始执行规则");
             Console.WriteLine("  boot            托盘监控(开机自启用): 跳过启动延时, 立即检测执行");
             Console.WriteLine("  once           检测一次并执行后退出");
-            Console.WriteLine("  status         查看当前屏幕/USB 设备与热点状态");
-            Console.WriteLine("  config         打开图形化设置(选择触发设备)");
+            Console.WriteLine("  status         查看当前屏幕/USB 设备、热点与自启动状态");
+            Console.WriteLine("  config         打开图形化设置(选择触发设备, 含自启动开关)");
             Console.WriteLine("  start          立即开启热点");
             Console.WriteLine("  stop           立即关闭热点");
+            Console.WriteLine("  autostart      查询是否开启开机自启动");
+            Console.WriteLine("  setautostart   开启/关闭开机自启动: setautostart on | off");
             Console.WriteLine();
-            Console.WriteLine("watch/boot/once/start/stop 需要管理员权限, 非管理员时自动请求提权。");
+            Console.WriteLine("watch/boot/once/start/stop/setautostart 需要管理员权限, 非管理员时自动请求提权。");
         }
 
         private static void ShowStatus()
@@ -1012,6 +1093,7 @@ namespace HotspotGuard
             Console.WriteLine("热点状态: " + Hotspot.GetState());
             var cfg = ConfigStore.Load();
             Console.WriteLine("屏幕触发项: " + cfg.Screens.Count + " 项, USB 触发项: " + cfg.Usb.Count + " 项, 仅接电触发: " + cfg.RequireACPower + ", 启动延时: " + cfg.StartupDelaySeconds + " 秒");
+            Console.WriteLine("开机自启动: " + (Autostart.IsEnabled() ? "已开启" : "已关闭"));
         }
 
         [STAThread]
@@ -1029,7 +1111,7 @@ namespace HotspotGuard
 
             Log.Write("==== HotspotGuard 启动, Mode=" + mode + " ====");
 
-            bool needAdmin = mode == "watch" || mode == "boot" || mode == "once" || mode == "start" || mode == "stop";
+            bool needAdmin = mode == "watch" || mode == "boot" || mode == "once" || mode == "start" || mode == "stop" || mode == "setautostart";
             if (needAdmin && !IsAdmin())
             {
                 Console.WriteLine("需要管理员权限, 正在请求提权...");
@@ -1074,6 +1156,21 @@ namespace HotspotGuard
                     Log.Write("once 模式结束, 结果: " + r);
                     break;
                 }
+                case "autostart":
+                    Console.WriteLine("开机自启动: " + (Autostart.IsEnabled() ? "已开启 (任务 HotspotGuard)" : "已关闭"));
+                    break;
+                case "setautostart":
+                    if (args.Length > 1)
+                    {
+                        bool on = args[1].Trim().ToLowerInvariant() == "on";
+                        Console.WriteLine("正在" + (on ? "开启" : "关闭") + "开机自启动...");
+                        Autostart.SetEnabled(on);
+                    }
+                    else
+                    {
+                        Console.WriteLine("用法: HotspotGuard.exe setautostart on|off");
+                    }
+                    break;
                 default:
                     TrayApp.Run(false);
                     break;
